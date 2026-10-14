@@ -217,7 +217,7 @@ class CrossFrameZarrDataset(Dataset):
         if self.is_training:
             self.transforms = create_training_transforms(
                 patch_size=self.patch_size,
-                no_spatial=bool(getattr(mgr, "no_spatial_augmentation", False)),
+                no_spatial=bool(getattr(mgr, "no_spatial", False) or getattr(mgr, "no_spatial_augmentation", False)),
                 no_scaling=bool(getattr(mgr, "no_scaling_augmentation", False)),
                 skeleton_targets=skeleton_targets or None,
                 skeleton_ignore_values=skeleton_ignore_values or None,

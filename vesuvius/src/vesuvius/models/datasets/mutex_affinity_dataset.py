@@ -456,7 +456,7 @@ class MutexAffinityDataset(Dataset):
         skeleton_targets, skeleton_ignore_values = self._get_skeleton_targets()
 
         if self.is_training:
-            no_spatial = getattr(self.mgr, 'no_spatial_augmentation', False)
+            no_spatial = getattr(self.mgr, 'no_spatial', False) or getattr(self.mgr, 'no_spatial_augmentation', False)
             no_scaling = getattr(self.mgr, 'no_scaling_augmentation', False)
 
             self.transforms = create_training_transforms(
