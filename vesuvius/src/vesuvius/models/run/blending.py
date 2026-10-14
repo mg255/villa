@@ -383,7 +383,7 @@ _worker_state = {}
 
 
 def _init_worker(part_files, output_path, gaussian_map, patch_size, num_classes, is_s3,
-                 finalize_config=None):
+                 finalize_config=None, coverage_path=None):
     """Initialize per-worker process state with cached zarr stores.
 
     Called once when each worker process starts. Zarr stores (and their
@@ -405,6 +405,8 @@ def _init_worker(part_files, output_path, gaussian_map, patch_size, num_classes,
         'logits_stores': {},
         'output_store': open_zarr(output_path, mode='r+', storage_options=storage_opts),
         'finalize_config': finalize_config,
+        'coverage_store': (open_zarr(coverage_path, mode='r+', storage_options=storage_opts)
+                           if coverage_path else None),
     })
 
 
@@ -529,7 +531,8 @@ def process_chunk(chunk_info, chunk_patches, epsilon=1e-8):
         finalize_config = _worker_state.get('finalize_config')
         if finalize_config is not None:
             from vesuvius.models.run.finalize_outputs import apply_finalization
-            result, is_empty = apply_finalization(chunk_logits, num_classes, finalize_config)
+            result, is_empty = apply_finalization(chunk_logits, num_classes, finalize_config,
+                                                  coverage=chunk_weights > 0)
             if not is_empty:
                 # Finalized output may have different channel count than blended logits;
                 # write using slices that match the finalized shape.
@@ -542,6 +545,9 @@ def process_chunk(chunk_info, chunk_patches, epsilon=1e-8):
                 output_store[finalized_slice] = result
         else:
             output_store[output_slice] = chunk_logits.astype(np.float16)
+            coverage_store = _worker_state.get('coverage_store')
+            if coverage_store is not None:
+                coverage_store[output_slice[1:]] = (chunk_weights > 0).astype(np.uint8)
 
     return {
         'chunk': chunk_info,
@@ -777,6 +783,26 @@ def merge_inference_outputs(
 
         print(f"Arrays found! Opening in r+ mode for part {global_part_id}")
 
+    # Unfused output also gets a uint8 `coverage` array inside the store (1 where any patch weight landed).
+    coverage_path = None
+    if finalize_config is None:
+        from vesuvius.models.run.finalize_outputs import coverage_path_for
+        coverage_path = coverage_path_for(output_path)
+        if global_part_id == 0:
+            open_zarr(
+                path=coverage_path,
+                mode='w',
+                storage_options={'anon': False} if coverage_path.startswith('s3://') else None,
+                shape=tuple(original_volume_shape),
+                chunks=output_chunks[1:],
+                compressor=compressor,
+                dtype=np.uint8,
+                fill_value=0,
+                write_empty_chunks=False
+            )
+        else:
+            wait_for_zarr_creation(coverage_path, verbose=verbose, part_id=global_part_id)
+
     # --- 4. Generate Gaussian Map ---
     gaussian_map = generate_gaussian_map(patch_size, sigma_scale=sigma_scale)
 
@@ -874,7 +900,8 @@ def merge_inference_outputs(
     with ProcessPoolExecutor(
         max_workers=num_workers,
         initializer=_init_worker,
-        initargs=(part_files, output_path, gaussian_map, patch_size, num_classes, is_s3, finalize_config)
+        initargs=(part_files, output_path, gaussian_map, patch_size, num_classes, is_s3, finalize_config,
+                  coverage_path)
     ) as executor:
         future_to_chunk = {
             executor.submit(

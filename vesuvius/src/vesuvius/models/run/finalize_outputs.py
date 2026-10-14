@@ -12,7 +12,7 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from vesuvius.data.utils import open_zarr
-from vesuvius.utils.io.zarr_utils import wait_for_zarr_creation
+from vesuvius.utils.io.zarr_utils import wait_for_zarr_creation, zarr_array_exists
 from vesuvius.utils.k8s import get_tqdm_kwargs
 from vesuvius.utils.cli import HyphenUnderscoreParser
 
@@ -26,7 +26,12 @@ class FinalizeConfig:
     target_info: Optional[dict] = None
 
 
-def apply_finalization(logits_np, num_classes, config: FinalizeConfig):
+def coverage_path_for(logits_path):
+    """Path of the uint8 coverage array blend_logits writes inside its output store."""
+    return os.path.join(logits_path, 'coverage')
+
+
+def apply_finalization(logits_np, num_classes, config: FinalizeConfig, coverage=None):
     """
     Apply softmax + mode logic to normalized logits, producing uint8 output.
 
@@ -36,6 +41,8 @@ def apply_finalization(logits_np, num_classes, config: FinalizeConfig):
         logits_np: float32 array (C, Z, Y, X) of normalized logits
         num_classes: number of classes (C dimension)
         config: FinalizeConfig with mode/threshold/multi-task settings
+        coverage: optional (Z, Y, X) array, 0 where no patch reached the voxel;
+            those voxels are written as 0 (background) in every mode
 
     Returns:
         (output_uint8, is_empty) — finalized uint8 array or (None, True) for empty chunks
@@ -123,6 +130,8 @@ def apply_finalization(logits_np, num_classes, config: FinalizeConfig):
             softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
             softmax_u8 = np.clip(np.rint(softmax * 255.0), 0, 255).astype(np.uint8)
             output_np = np.concatenate([softmax_u8, argmax], axis=0)
+        if coverage is not None:
+            output_np[:, coverage == 0] = 0
 
         # Empty chunks were caught above; skip a finalized chunk only when
         # every byte is identical, which is what the old path did after scaling.
@@ -131,6 +140,8 @@ def apply_finalization(logits_np, num_classes, config: FinalizeConfig):
         return output_np, False
 
     output_np = np.clip(output_data * 255.0, 0, 255).astype(np.uint8)
+    if coverage is not None:
+        output_np[:, coverage == 0] = 0
     return output_np, False
 
 
@@ -164,7 +175,7 @@ def compute_finalized_shape(spatial_shape, num_classes, config: FinalizeConfig):
             return (num_classes + 1, *spatial_shape)
 
 
-def process_chunk(chunk_info, input_path, output_path, mode, threshold, num_classes, spatial_shape, output_chunks, is_multi_task=False, target_info=None):
+def process_chunk(chunk_info, input_path, output_path, mode, threshold, num_classes, spatial_shape, output_chunks, is_multi_task=False, target_info=None, coverage_path=None):
     """
     Process a single chunk of the volume in parallel.
 
@@ -179,6 +190,7 @@ def process_chunk(chunk_info, input_path, output_path, mode, threshold, num_clas
         output_chunks: Chunk size for output
         is_multi_task: Whether this is a multi-task model
         target_info: Dictionary with target information for multi-task models
+        coverage_path: Optional path of the blended store's coverage array
     """
     
     chunk_idx = chunk_info['indices']
@@ -209,7 +221,14 @@ def process_chunk(chunk_info, input_path, output_path, mode, threshold, num_clas
         is_multi_task=is_multi_task,
         target_info=target_info,
     )
-    output_np, is_empty = apply_finalization(logits_np, num_classes, config)
+    coverage = None
+    if coverage_path is not None:
+        coverage = open_zarr(
+            path=coverage_path,
+            mode='r',
+            storage_options={'anon': False} if coverage_path.startswith('s3://') else None
+        )[spatial_slices]
+    output_np, is_empty = apply_finalization(logits_np, num_classes, config, coverage=coverage)
 
     if is_empty:
         return {'chunk_idx': chunk_idx, 'processed_voxels': 0, 'empty': True}
@@ -289,6 +308,12 @@ def finalize_logits(
         is_multi_task = input_store.attrs.get('is_multi_task', False)
         target_info = input_store.attrs.get('target_info', None)
     
+    # Stores blended before the coverage array existed are finalized as before.
+    coverage_path = coverage_path_for(input_path)
+    if not zarr_array_exists(coverage_path):
+        coverage_path = None
+    print(f"Coverage mask: {coverage_path or 'absent (voxels no patch reached are not masked)'}")
+
     # Verify we have the expected number of channels based on mode
     print(f"Input shape: {input_shape}, Num classes: {num_classes}")
     if is_multi_task:
@@ -451,7 +476,8 @@ def finalize_logits(
         spatial_shape=spatial_shape,
         output_chunks=output_chunks,
         is_multi_task=is_multi_task,
-        target_info=target_info
+        target_info=target_info,
+        coverage_path=coverage_path
     )
     
     total_processed = 0
