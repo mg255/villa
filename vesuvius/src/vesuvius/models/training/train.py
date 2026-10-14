@@ -1980,8 +1980,14 @@ class BaseTrainer:
                 step_stage_start = perf_counter()
             scaler.unscale_(optimizer)
             grad_clip = getattr(self.mgr, 'gradient_clip', 12.0)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            if isinstance(scaler, torch.amp.GradScaler) or torch.isfinite(grad_norm):
+                scaler.step(optimizer)
+            else:
+                optimizer.zero_grad(set_to_none=True)
+                self._skipped_nonfinite_steps = getattr(self, '_skipped_nonfinite_steps', 0) + 1
+                print(f"WARNING: non-finite gradient norm ({grad_norm.item()}) at epoch {epoch} step {step}; "
+                      f"skipping optimizer step ({self._skipped_nonfinite_steps} skipped so far)")
             scaler.update()
             optimizer_stepped = True
             self._update_ema_model(model)
