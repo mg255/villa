@@ -803,16 +803,9 @@ class Inferer():
         # Handle train.py model normalization scheme mapping
         if self.model_normalization_scheme and normalization_scheme == 'zscore':
             # This is a train.py model with 'zscore' normalization
-            if self.model_intensity_properties and 'mean' in self.model_intensity_properties and 'std' in self.model_intensity_properties:
-                # We have intensity properties, use global_zscore
-                normalization_scheme = 'global_zscore'
-                if self.verbose:
-                    print("Mapped 'zscore' to 'global_zscore' (intensity properties available)")
-            else:
-                # No intensity properties, use instance_zscore
-                normalization_scheme = 'instance_zscore'
-                if self.verbose:
-                    print("Mapped 'zscore' to 'instance_zscore' (no intensity properties)")
+            # Training normalises each patch with its own mean/std and ignores stored intensity properties
+            normalization_scheme = 'instance_zscore'
+            print("Mapped 'zscore' to 'instance_zscore' (per patch, as in training)")
         
         # Extract global normalization parameters if using global_zscore
         global_mean = None
