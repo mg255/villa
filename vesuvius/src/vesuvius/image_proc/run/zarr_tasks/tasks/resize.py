@@ -1,6 +1,8 @@
 """Resize task for zarr arrays.
 
-Resizes an OME-Zarr to match the shape of a reference OME-Zarr using cv2 resize.
+Resizes an OME-Zarr to match the shape of a reference OME-Zarr. Nearest and
+linear interpolation sample at global source coordinates; the other methods
+resize each chunk with cv2.
 """
 
 from __future__ import annotations
@@ -62,6 +64,17 @@ def _resize_chunk_3d(
     return resized_yx
 
 
+# Interpolations sampled at global source coordinates; others use per-chunk cv2.
+_MAP_COORDINATES_ORDER = {cv2.INTER_NEAREST: 0, cv2.INTER_LINEAR: 1}
+
+
+def _source_coords(o_start: int, o_end: int, scale: float, in_size: int) -> np.ndarray:
+    """Global input coordinates of output voxels along one axis (pixel centres
+    aligned as in cv2.resize, clamped to the input)."""
+    c = (np.arange(o_start, o_end, dtype=np.float64) + 0.5) * scale - 0.5
+    return np.clip(c, 0, in_size - 1)
+
+
 def _resize_chunk_worker(args: Tuple) -> Optional[Tuple[int, int, int]]:
     """Process a single output chunk."""
     (
@@ -91,6 +104,38 @@ def _resize_chunk_worker(args: Tuple) -> Optional[Tuple[int, int, int]]:
     ox_end = min(ox_start + out_chunk_size[2], output_shape[2])
 
     out_chunk_shape = (oz_end - oz_start, oy_end - oy_start, ox_end - ox_start)
+
+    order = _MAP_COORDINATES_ORDER.get(interpolation)
+    if order is not None:
+        # Sample at global source coordinates so the scale and pixel alignment
+        # are the same in every chunk; read the covering input region plus the
+        # neighbour needed for interpolation.
+        coords = [
+            _source_coords(o_start, o_end, in_size / out_size, in_size)
+            for o_start, o_end, in_size, out_size in zip(
+                (oz_start, oy_start, ox_start),
+                (oz_end, oy_end, ox_end),
+                input_shape,
+                output_shape,
+            )
+        ]
+        lo = [int(np.floor(c[0])) for c in coords]
+        hi = [min(int(np.floor(c[-1])) + 2, n) for c, n in zip(coords, input_shape)]
+        input_chunk = input_data[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]]
+        if not input_chunk.any():
+            return None
+        from scipy import ndimage
+
+        grid = np.meshgrid(*(c - l for c, l in zip(coords, lo)), indexing="ij")
+        resized = ndimage.map_coordinates(
+            input_chunk.astype(np.float64), grid, order=order, mode="nearest"
+        )
+        if np.issubdtype(input_chunk.dtype, np.integer):
+            info = np.iinfo(input_chunk.dtype)
+            resized = np.clip(np.rint(resized), info.min, info.max)
+        resized = resized.astype(input_chunk.dtype)
+        _write_output(output_data, resized, oz_start, oy_start, ox_start, output_dtype)
+        return (oz_start, oy_start, ox_start)
 
     # Calculate corresponding input region (with float precision)
     scale_z = input_shape[0] / output_shape[0]
@@ -122,6 +167,16 @@ def _resize_chunk_worker(args: Tuple) -> Optional[Tuple[int, int, int]]:
 
     # Resize to output chunk shape
     resized = _resize_chunk_3d(input_chunk, out_chunk_shape, interpolation)
+    _write_output(output_data, resized, oz_start, oy_start, ox_start, output_dtype)
+
+    return (oz_start, oy_start, ox_start)
+
+
+def _write_output(output_data, resized, oz_start, oy_start, ox_start, output_dtype):
+    """Cast to the output dtype if specified and write the chunk."""
+    oz_end = oz_start + resized.shape[0]
+    oy_end = oy_start + resized.shape[1]
+    ox_end = ox_start + resized.shape[2]
 
     # Convert dtype if specified
     if output_dtype is not None and resized.dtype != output_dtype:
@@ -135,8 +190,6 @@ def _resize_chunk_worker(args: Tuple) -> Optional[Tuple[int, int, int]]:
 
     # Write to output
     output_data[oz_start:oz_end, oy_start:oy_end, ox_start:ox_end] = resized
-
-    return (oz_start, oy_start, ox_start)
 
 
 @register_task("resize")
