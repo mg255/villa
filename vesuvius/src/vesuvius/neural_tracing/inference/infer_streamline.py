@@ -617,6 +617,8 @@ def _load_surface_zyx(tifxyz_path):
         raise NotADirectoryError(f"tifxyz path must be a directory: {tifxyz_path}")
 
     surface = read_tifxyz(tifxyz_path)
+    if int(VOLUME_SCALE):  # tifxyz is in level-0 voxels; crops come from level VOLUME_SCALE
+        surface = surface.retarget(2 ** int(VOLUME_SCALE))
     surface.use_stored_resolution()
     x, y, z, valid = surface[:]
     stored_zyxs = np.stack([z, y, x], axis=-1)
@@ -1350,7 +1352,7 @@ def _require_avg_field(avg_group, name, channels):
 
 
 def _integration_step_sizes():
-    tifxyz_step = float(TIFXYZ_VOXEL_STEP)
+    tifxyz_step = float(TIFXYZ_VOXEL_STEP) / 2 ** int(VOLUME_SCALE)
     tifxyz_steps = int(TIFXYZ_STEPS)
     step_size = float(INTEGRATION_STEP_SIZE)
     if tifxyz_step <= 0.0:
@@ -2035,7 +2037,7 @@ def integrate_streamlines_from_edge(avg_group, edge_zyx, edge_axis_scale, window
     integration.create_dataset("diagnostic_validity_oob", data=diag_validity_oob, chunks=(min(n_steps, 4096),))
     integration.create_dataset("diagnostic_validity_nonfinite", data=diag_validity_nonfinite, chunks=(min(n_steps, 4096),))
     integration.create_dataset("diagnostic_low_validity", data=diag_low_validity, chunks=(min(n_steps, 4096),))
-    integration.attrs["tifxyz_voxel_step"] = float(TIFXYZ_VOXEL_STEP)
+    integration.attrs["tifxyz_voxel_step"] = float(TIFXYZ_VOXEL_STEP) / 2 ** int(VOLUME_SCALE)
     integration.attrs["tifxyz_steps"] = int(TIFXYZ_STEPS)
     integration.attrs["integration_steps"] = int(len(step_sizes))
     integration.attrs["integration_step_size"] = float(INTEGRATION_STEP_SIZE)
@@ -2367,6 +2369,8 @@ def save_merged_streamline_tifxyz(
         cond_direction,
         integration_group,
     )
+    # Back to level-0 voxels so the saved tifxyz matches its input.
+    merged_zyxs = np.where((merged_zyxs == -1).all(axis=-1, keepdims=True), -1.0, merged_zyxs * 2 ** int(VOLUME_SCALE))
     output_dir = _output_tifxyz_dir() if output_dir is None else Path(output_dir)
     output_uuid = _output_tifxyz_uuid(
         iteration_idx=iteration_idx,
@@ -2582,6 +2586,8 @@ def _run_streamline_iteration(
         integration_margin=bbox_integration_margin,
     )
     surface = read_tifxyz(input_tifxyz_path)
+    if int(VOLUME_SCALE):
+        surface = surface.retarget(2 ** int(VOLUME_SCALE))
     edge_axis_scale = surface._scale[0] if _get_direction_spec(cond_direction)["axis"] == "col" else surface._scale[1]
     output_path = _output_zarr_path(iteration_idx)
     expected_output_tifxyz_path = None
