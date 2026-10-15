@@ -332,7 +332,8 @@ def _downsample_chunk_worker(chunk_start):
     parent_slices = tuple(parent_slices)
 
     source = np.asarray(parent_ds[parent_slices])
-    downsampled = downsample_2x(source, axes=down_axes)
+    # Labels are (z, y, x); normals and frames carry trailing vector axes.
+    downsampled = downsample_2x(source, axes=down_axes, vectors=ndim > 3)
 
     expected_shape = tuple(s.stop - s.start for s in target_slices)
     if downsampled.shape != expected_shape:
@@ -946,14 +947,36 @@ def process_slice_points_label_surface(vertices, triangles, mesh_labels,
     return label_img, normals_img, frame_img
 
 
-def downsample_2x(array, axes):
-    """Downsample array by a factor of 2 along the provided axes."""
+def downsample_2x(array, axes, vectors=False):
+    """Downsample array by a factor of 2 along the provided axes by pooling 2x blocks.
+
+    Labels take the maximum of each block, so a thin surface stays connected.
+    With ``vectors=True`` the last axis holds vector components and each block
+    becomes the mean of its non-zero vectors renormalised to unit length (zero
+    where the block has no non-zero vector). Odd edges pool over a partial block.
+    """
     ndim = array.ndim
-    norm_axes = [(axis + ndim) % ndim for axis in axes]
-    slices = [slice(None)] * ndim
-    for axis in norm_axes:
-        slices[axis] = slice(0, None, 2)
-    return array[tuple(slices)]
+    norm_axes = {(axis + ndim) % ndim for axis in axes}
+    pad = [(0, array.shape[axis] % 2 if axis in norm_axes else 0) for axis in range(ndim)]
+    if any(after for _, after in pad):
+        array = np.pad(array, pad)
+    block_shape = []
+    block_axes = []
+    for axis, dim in enumerate(array.shape):
+        if axis in norm_axes:
+            block_shape.extend((dim // 2, 2))
+            block_axes.append(len(block_shape) - 1)
+        else:
+            block_shape.append(dim)
+    blocks = array.reshape(block_shape)
+    if not vectors:
+        return blocks.max(axis=tuple(block_axes))
+    # Zero vectors add nothing to the sum, and renormalising removes the count,
+    # so the normalised sum equals the normalised mean of the non-zero vectors.
+    total = blocks.astype(np.float32).sum(axis=tuple(block_axes))
+    norm = np.linalg.norm(total, axis=-1, keepdims=True)
+    unit = np.divide(total, norm, out=np.zeros_like(total), where=norm > 0)
+    return unit.astype(array.dtype)
 
 
 def build_pyramid(array, levels, axes):
