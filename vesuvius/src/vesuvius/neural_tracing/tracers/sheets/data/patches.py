@@ -1,5 +1,8 @@
 """Verified tifxyz patches: a cached index, memory-mapped coordinates and canonical GT windows.
 
+Compressed ``x, y, z`` TIFFs (the published tifxyz and ``write_tifxyz`` output are LZW) cannot be memory-mapped;
+they are read into memory instead, with a warning.
+
 Patch coordinates are level-0 ``x, y, z`` with ``-1`` marking invalid nodes; ``meta.json`` ``scale`` is grid
 nodes per voxel, so one grid cell spans ``1 / scale`` voxels. Where the nodes are actually spaced more than
 ``SCALE_TOLERANCE`` away from that (some patch families state twice their real cell size), the index uses the
@@ -11,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -21,6 +25,9 @@ import tifffile
 
 INDEX_VERSION = 4
 SCALE_TOLERANCE = .2  # relative difference between measured and stated cell size beyond which the measured one is used
+
+log = logging.getLogger(__name__)
+_warned: set[Path] = set()  # patches already warned about being read into memory
 
 
 @dataclass(frozen=True)
@@ -69,10 +76,29 @@ class GridSpec:
         return self.v_lo+self.res*np.arange(self.Gv)
 
 
+def _open_xyz(path: Path) -> tuple:
+    """``x, y, z`` of a patch, memory-mapped; a compressed file (not mappable) is read into memory instead."""
+    out = []
+    for c in 'xyz':
+        try:
+            out.append(tifffile.memmap(path/f'{c}.tif'))
+        except ValueError:
+            with tifffile.TiffFile(path/f'{c}.tif') as tif:
+                if tif.pages[0].compression == 1:  # uncompressed yet not mappable: not ours to handle
+                    raise
+            out.append(tifffile.imread(path/f'{c}.tif'))
+    read = [a for a in out if not isinstance(a, np.memmap)]
+    if read and path not in _warned:
+        _warned.add(path)
+        log.warning('%s: compressed tifxyz cannot be memory-mapped; reading it into memory (%.1f MB held while '
+                    'open); store x/y/z.tif uncompressed to avoid this', path, sum(a.nbytes for a in read)/2**20)
+    return tuple(out)
+
+
 def _scan(path: Path) -> PatchInfo | None:
     try:
         meta = json.loads((path/'meta.json').read_text())
-        xyz = [tifffile.memmap(path/f'{c}.tif') for c in 'xyz']
+        xyz = _open_xyz(path)
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     scale = float(meta.get('scale', [0])[0])
@@ -101,12 +127,16 @@ def measured_cell(xyz, ok) -> float:
 
 def build_index(patches_dir, cache_dir: str | Path, workers: int = 8) -> list[PatchInfo]:
     """Index of one patch directory or a list of them (concatenated in order; each directory is cached on its
-    own, keyed by its path and sorted entry names, so adding a directory does not rescan the others)."""
+    own, keyed by its path, sorted entry names and the size and mtime of each x/y/z.tif, so adding a directory
+    does not rescan the others and a rewritten patch file does)."""
     if isinstance(patches_dir, (list, tuple)):
         return [info for d in patches_dir for info in build_index(d, cache_dir, workers)]
     patches_dir = Path(patches_dir)
     names = sorted(p.name for p in patches_dir.iterdir() if (p/'x.tif').is_file())
-    key = hashlib.sha256(json.dumps([INDEX_VERSION, str(patches_dir.resolve()), names]).encode()).hexdigest()[:16]
+    files = [patches_dir/n/f'{c}.tif' for n in names for c in 'xyz']
+    stats = [(f.stat().st_size, f.stat().st_mtime_ns) if f.is_file() else None for f in files]
+    key = hashlib.sha256(json.dumps([INDEX_VERSION, str(patches_dir.resolve()), names, stats]).encode()
+                         ).hexdigest()[:16]
     cache = Path(cache_dir)/f'patch_index_{key}.json'
     if cache.is_file():
         return [PatchInfo(**dict(row, bbox=tuple(row['bbox']))) for row in json.loads(cache.read_text())]
@@ -120,7 +150,7 @@ def build_index(patches_dir, cache_dir: str | Path, workers: int = 8) -> list[Pa
 
 
 class PatchStore:
-    """Lazily memory-mapped ``x, y, z`` of each patch, with a bounded number of open maps per process."""
+    """Lazily memory-mapped (compressed: read) ``x, y, z`` of each patch, with a bounded number open per process."""
 
     def __init__(self, max_open: int = 128):
         self.max_open = max_open
@@ -136,7 +166,7 @@ class PatchStore:
         path = info.path
         hit = self._open.get(path)
         if hit is None:
-            hit = tuple(tifffile.memmap(path/f'{c}.tif') for c in 'xyz')
+            hit = _open_xyz(path)
             self._open[path] = hit
             while len(self._open) > self.max_open:
                 self._open.popitem(last=False)
