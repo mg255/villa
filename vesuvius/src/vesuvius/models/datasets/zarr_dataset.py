@@ -470,6 +470,12 @@ class ZarrDataset(Dataset):
         mapping_file : Path
             Path to the samples_mapping.json file
         """
+        if self.ome_zarr_resolution:
+            raise ValueError(
+                f"{mapping_file}: samples_mapping.json stores positions in level-0 units; "
+                f"ome_zarr_resolution={self.ome_zarr_resolution} (> 0) is not supported for "
+                "packed sparse zarrs. Use ome_zarr_resolution: 0."
+            )
         with open(mapping_file) as f:
             mapping = json.load(f)
 

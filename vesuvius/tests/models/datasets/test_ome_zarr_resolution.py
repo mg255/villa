@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -77,3 +78,23 @@ def test_missing_ome_zarr_level_raises(tmp_path: Path) -> None:
     # Level 0 is unchanged: the plain array and the level-0-only group still open.
     np.testing.assert_array_equal(_open_at(0, tmp_path / "plain.zarr")[:], data)
     np.testing.assert_array_equal(_open_at(0, tmp_path / "l0.zarr")[:], data)
+
+
+def test_packed_sparse_mapping_is_level_0_only(tmp_path: Path) -> None:
+    _write_pyramid(tmp_path / "images" / "vol.zarr", np.full((64, 64, 64), 100, dtype=np.uint8))
+    _write_pyramid(tmp_path / "labels" / "vol_ink.zarr", np.ones((64, 64, 64), dtype=np.uint8))
+    samples = [{"zarr_position": [0, 0, x], "sample_shape": [16, 16, 16]} for x in (0, 32)]
+    (tmp_path / "samples_mapping.json").write_text(json.dumps(
+        {"layout": {"sample_shape": [16, 16, 16], "gap_size": 16}, "samples": samples}))
+
+    def load(level):
+        mgr = ConfigManager(verbose=False)
+        mgr.load_config(_write_config(tmp_path, level=level, find_level=1))
+        return mgr
+
+    # samples_mapping.json is in level-0 units, so level > 0 is rejected, not zero-padded.
+    with pytest.raises(ValueError, match=r"level-0 units.*ome_zarr_resolution=1.*packed sparse"):
+        ZarrDataset(load(1), is_training=False)
+    assert [p.position for p in ZarrDataset(load(0), is_training=False)._patches] == [(0, 0, 0), (0, 0, 32)]
+    # `ome_zarr_resolution: null` in YAML means level 0.
+    assert load(None).ome_zarr_resolution == 0

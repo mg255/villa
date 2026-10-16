@@ -359,7 +359,8 @@ class ConfigManager:
 
         # Chunk-slicing worker configuration
         self.valid_patch_find_resolution = int(self.dataset_config.get("valid_patch_find_resolution", 1))
-        self.ome_zarr_resolution = int(self.dataset_config.get("ome_zarr_resolution", 0))
+        ome_zarr_resolution = self.dataset_config.get("ome_zarr_resolution", 0)
+        self.ome_zarr_resolution = int(0 if ome_zarr_resolution is None else ome_zarr_resolution)
         if self.ome_zarr_resolution < 0:
             raise ValueError(
                 f"dataset_config.ome_zarr_resolution must be >= 0, got {self.ome_zarr_resolution}"
