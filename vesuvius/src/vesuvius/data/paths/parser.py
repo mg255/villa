@@ -5,11 +5,11 @@ import aiohttp
 from typing import Dict, Optional, List
 from .fetcher import fetch
 
-async def get_directory_structure(url: str, session: aiohttp.ClientSession, ignore_list: Optional[List[str]] = None, zarr_pattern: str = r'\.zarr/$') -> Dict[str, Optional[Dict]]:    
+async def get_directory_structure(url: str, session: aiohttp.ClientSession, ignore_list: Optional[List[str]] = None, zarr_pattern: str = r'\.zarr/$', failures: Optional[List[str]] = None) -> Dict[str, Optional[Dict]]:    
     if ignore_list is None:
         ignore_list = []
     
-    page_content = await fetch(session, url)
+    page_content = await fetch(session, url, failures)
     if not page_content:
         return {}
     
@@ -25,7 +25,7 @@ async def get_directory_structure(url: str, session: aiohttp.ClientSession, igno
             if any(re.search(pattern, href) for pattern in ignore_list):
                 continue
             if href.endswith('/') and not re.search(zarr_pattern, href):  # Normal directories
-                tasks.append(get_directory_structure(full_url, session, ignore_list, zarr_pattern))
+                tasks.append(get_directory_structure(full_url, session, ignore_list, zarr_pattern, failures))
                 hrefs.append(href)
             elif re.search(zarr_pattern, href):  # .zarr directories
                 directory_tree[href] = None  # Mark it as a zarr directory without further traversal

@@ -60,9 +60,12 @@ def _config_dir() -> Path:
 
 
 async def scrape_website(
-    base_url: str, ignore_list: List[str]
+    base_url: str, ignore_list: List[str], failures: Optional[List[str]] = None
 ) -> Tuple[CatalogTree, CatalogListing]:
-    """Collect directory metadata and Zarr links from a remote listing."""
+    """Collect directory metadata and Zarr links from a remote listing.
+
+    URLs that could not be fetched are appended to ``failures`` when it is given.
+    """
 
     parser, aiohttp = _load_parser("Refreshing the catalog from the data server")
 
@@ -75,7 +78,7 @@ async def scrape_website(
 
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         directory_tree = await parser.get_directory_structure(
-            base_url, session, ignore_list
+            base_url, session, ignore_list, failures=failures
         )
         zarr_files = await parser.find_zarr_files(directory_tree, base_url, session)
         return directory_tree, zarr_files
@@ -128,8 +131,26 @@ def update_list(
             "nest_asyncio", "Refreshing the catalog from inside a running event loop"
         ).apply()
 
-    tree, zarr_files = loop.run_until_complete(scrape_website(base_url, ignore_list))
-    cubes_tree, _ = loop.run_until_complete(scrape_website(base_url_cubes, ignore_list))
+    failures: List[str] = []
+    tree, zarr_files = loop.run_until_complete(
+        scrape_website(base_url, ignore_list, failures)
+    )
+    cubes_tree, _ = loop.run_until_complete(
+        scrape_website(base_url_cubes, ignore_list, failures)
+    )
+
+    # Writing a partial or empty scrape would replace the packaged catalog and
+    # make list_files()/list_cubes() return {} without any error.
+    if failures or not zarr_files or not cubes_tree:
+        problem = (
+            f"{len(failures)} listing(s) could not be fetched, first: {failures[0]}"
+            if failures
+            else "the data server listing contained no scrolls or cubes"
+        )
+        raise RuntimeError(
+            f"update_list did not refresh the catalog: {problem}. "
+            f"The existing YAML files in {config_dir} were left unchanged."
+        )
 
     directory_config.write_text(
         yaml.dump(tree, default_flow_style=False), encoding="utf-8"
