@@ -27,6 +27,7 @@ from vesuvius.ink_detection.models.checkpoint import (
     select_inference_weights,
 )
 from vesuvius.ink_detection.config import InkConfig, NormalizationConfig
+from vesuvius.ink_detection.data.segment import parse_label_asset_path
 from vesuvius.ink_detection.inference.inference_runtime import (
     TargetModel,
     flip_spatial,
@@ -1169,13 +1170,14 @@ def resolve_segment_zarr_path(segment_dir: Path) -> Path:
         segment_dir / segment_dir.name,
         segment_dir / f"{segment_dir.name}.zarr",
         segment_dir / f"{segment_dir.name}.ome.zarr",
+        segment_dir / "surface-volume.zarr",
     )
     for candidate in candidates:
         if candidate.exists():
             return candidate
     discovered = []
     for child in sorted(segment_dir.iterdir()):
-        if not child.is_dir():
+        if not child.is_dir() or parse_label_asset_path(child) is not None:
             continue
         if child.suffix == ".zarr" or any(
             (child / marker).exists()
@@ -1194,7 +1196,7 @@ def infer_folder(
     configured_model: ConfiguredModel,
     *,
     device: torch.device,
-) -> None:
+) -> int:
     """Run sorted folder segments, skipping any previously dated prediction."""
 
     folder = Path(args.folder)
@@ -1203,7 +1205,11 @@ def infer_folder(
     try:
         resolve_segment_zarr_path(folder)
     except FileNotFoundError:
-        segment_dirs = sorted(path for path in folder.iterdir() if path.is_dir())
+        segment_dirs = sorted(
+            path
+            for path in folder.iterdir()
+            if path.is_dir() and path.suffix != ".zarr"
+        )
         if not segment_dirs:
             raise FileNotFoundError(f"No segment directories found under {folder}")
     else:
@@ -1213,6 +1219,7 @@ def infer_folder(
     prefix = f"{args.output_prefix}_" if args.output_prefix else ""
     ran_count = 0
     skipped_count = 0
+    resolved_count = 0
     for segment_dir in segment_dirs:
         try:
             input_zarr = resolve_segment_zarr_path(segment_dir)
@@ -1220,6 +1227,7 @@ def infer_folder(
             LOGGER.warning("Skipping %s: %s", segment_dir, exc)
             skipped_count += 1
             continue
+        resolved_count += 1
         for direction in resolve_run_directions(args.direction):
             name_prefix = (
                 f"{prefix}{segment_dir.name}_{checkpoint_stem}_{direction}_"
@@ -1253,6 +1261,13 @@ def infer_folder(
         ran_count,
         skipped_count,
     )
+    if resolved_count == 0:
+        LOGGER.warning(
+            "No segment under %s resolved to an input Zarr; nothing was run",
+            folder,
+        )
+        return 1
+    return 0
 
 
 def _is_url(path: str | Path) -> bool:
@@ -1378,7 +1393,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     configured = replace(configured, model=prepared_model)
     if args.folder is not None:
-        infer_folder(args, configured, device=device)
+        return infer_folder(args, configured, device=device)
     else:
         for direction in resolve_run_directions(args.direction):
             infer_single_zarr(
