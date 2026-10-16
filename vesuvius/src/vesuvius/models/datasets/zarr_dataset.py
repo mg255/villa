@@ -688,7 +688,28 @@ class ZarrDataset(Dataset):
             unlabeled_fg_enabled=self.unlabeled_fg_enabled,
             unlabeled_fg_threshold=self.unlabeled_fg_threshold,
             unlabeled_fg_bbox_threshold=self.unlabeled_fg_bbox_threshold,
+            ome_zarr_resolution=self.ome_zarr_resolution,
         )
+
+    @staticmethod
+    def _cached_position_to_training_level(
+        position: Tuple[int, ...],
+        ome_zarr_resolution: int,
+    ) -> Tuple[int, ...]:
+        """Convert cached full-resolution coordinates into the selected training level."""
+        scale_factor = 2 ** int(ome_zarr_resolution)
+        if scale_factor == 1:
+            return position
+
+        converted = []
+        for coord in position:
+            coord = int(coord)
+            if coord % scale_factor != 0:
+                raise ValueError(
+                    f"Cached full-resolution position {position} is not divisible by scale factor {scale_factor}"
+                )
+            converted.append(coord // scale_factor)
+        return tuple(converted)
 
     def _load_from_cache(self, cache_data) -> None:
         """Load patches from cache data."""
@@ -701,7 +722,9 @@ class ZarrDataset(Dataset):
             self._patches.append(PatchInfo(
                 volume_index=vol_idx,
                 volume_name=entry.volume_name,
-                position=entry.position,
+                position=self._cached_position_to_training_level(
+                    entry.position, self.ome_zarr_resolution
+                ),
                 patch_size=self.patch_size,
                 is_unlabeled_fg=False,
             ))
@@ -713,7 +736,9 @@ class ZarrDataset(Dataset):
             self._patches.append(PatchInfo(
                 volume_index=vol_idx,
                 volume_name=entry.volume_name,
-                position=entry.position,
+                position=self._cached_position_to_training_level(
+                    entry.position, self.ome_zarr_resolution
+                ),
                 patch_size=self.patch_size,
                 is_unlabeled_fg=True,
             ))

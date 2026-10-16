@@ -34,10 +34,11 @@ class PatchCacheParams:
     unlabeled_fg_enabled: bool = True
     unlabeled_fg_threshold: float = 0.05
     unlabeled_fg_bbox_threshold: float = 0.15
+    ome_zarr_resolution: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        config = {
             "schema_version": SCHEMA_VERSION,
             "data_path": self.data_path,
             "volume_ids": list(self.volume_ids),
@@ -50,6 +51,10 @@ class PatchCacheParams:
             "unlabeled_fg_threshold": float(self.unlabeled_fg_threshold),
             "unlabeled_fg_bbox_threshold": float(self.unlabeled_fg_bbox_threshold),
         }
+        # Only keyed when non-zero so level-0 cache files keep their names.
+        if self.ome_zarr_resolution:
+            config["ome_zarr_resolution"] = int(self.ome_zarr_resolution)
+        return config
 
 
 @dataclass
@@ -82,6 +87,7 @@ def build_cache_params(
     unlabeled_fg_enabled: bool = True,
     unlabeled_fg_threshold: float = 0.05,
     unlabeled_fg_bbox_threshold: float = 0.15,
+    ome_zarr_resolution: int = 0,
 ) -> PatchCacheParams:
     """Build cache params from individual arguments."""
     return PatchCacheParams(
@@ -95,6 +101,7 @@ def build_cache_params(
         unlabeled_fg_enabled=bool(unlabeled_fg_enabled),
         unlabeled_fg_threshold=float(unlabeled_fg_threshold),
         unlabeled_fg_bbox_threshold=float(unlabeled_fg_bbox_threshold),
+        ome_zarr_resolution=int(ome_zarr_resolution),
     )
 
 
@@ -227,6 +234,7 @@ def try_load_patch_cache(
     unlabeled_fg_enabled: bool = True,
     unlabeled_fg_threshold: float = 0.05,
     unlabeled_fg_bbox_threshold: float = 0.15,
+    ome_zarr_resolution: int = 0,
 ) -> Optional[PatchCacheData]:
     """
     Convenience function to build cache params and load cache if it exists.
@@ -255,6 +263,8 @@ def try_load_patch_cache(
         Min fraction of non-zero image voxels.
     unlabeled_fg_bbox_threshold : float
         Min bbox coverage for image data.
+    ome_zarr_resolution : int
+        Multi-resolution level used for training data reads.
 
     Returns
     -------
@@ -272,5 +282,6 @@ def try_load_patch_cache(
         unlabeled_fg_enabled=unlabeled_fg_enabled,
         unlabeled_fg_threshold=unlabeled_fg_threshold,
         unlabeled_fg_bbox_threshold=unlabeled_fg_bbox_threshold,
+        ome_zarr_resolution=ome_zarr_resolution,
     )
     return load_patch_cache(cache_dir, params)

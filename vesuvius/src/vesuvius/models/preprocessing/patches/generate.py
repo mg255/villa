@@ -78,6 +78,10 @@ def generate_patch_caches(
 
     data_path = Path(mgr.data_path)
     patch_size = tuple(int(v) for v in mgr.train_patch_size)
+    # Cached positions are level-0 coordinates; at training level s a patch
+    # covers patch_size * 2**s level-0 voxels.
+    ome_zarr_resolution = int(getattr(mgr, "ome_zarr_resolution", 0))
+    full_res_patch_size = tuple(v * 2 ** ome_zarr_resolution for v in patch_size)
 
     # Resolve target names
     target_names = _resolve_target_names(mgr)
@@ -112,6 +116,7 @@ def generate_patch_caches(
         unlabeled_fg_bbox_threshold=float(
             getattr(mgr, "unlabeled_foreground_bbox_threshold", 0.15)
         ),
+        ome_zarr_resolution=ome_zarr_resolution,
     )
 
     # Check if cache already exists
@@ -171,7 +176,7 @@ def generate_patch_caches(
     result = find_valid_patches(
         label_arrays=label_arrays,
         label_names=label_names,
-        patch_size=patch_size,
+        patch_size=full_res_patch_size,
         bbox_threshold=cache_params.bbox_threshold,
         label_threshold=cache_params.min_labeled_ratio,
         valid_patch_find_resolution=cache_params.valid_patch_find_resolution,
