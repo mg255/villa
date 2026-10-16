@@ -58,3 +58,22 @@ def test_config_manager_loads_ome_zarr_resolution(tmp_path: Path) -> None:
     assert dataset._volumes[0].spatial_shape == (32, 32, 32)
     assert len(dataset._patches) == 8
     assert all(max(p.position) + 16 <= 32 for p in dataset._patches)
+
+
+def _open_at(level: int, path: Path):
+    # _open_zarr opens every image and label volume; it only reads ome_zarr_resolution.
+    return ZarrDataset._open_zarr(type("Ds", (), {"ome_zarr_resolution": level})(), path)
+
+
+def test_missing_ome_zarr_level_raises(tmp_path: Path) -> None:
+    data = np.arange(32 ** 3, dtype=np.uint8).reshape(32, 32, 32)
+    zarr.create_array(str(tmp_path / "plain.zarr"), data=data, chunks=(16, 16, 16))
+    zarr.open_group(str(tmp_path / "l0.zarr"), mode="w").create_array("0", data=data)
+
+    with pytest.raises(ValueError, match=r"plain\.zarr.*ome_zarr_resolution=1.*level 0 only"):
+        _open_at(1, tmp_path / "plain.zarr")
+    with pytest.raises(ValueError, match=r"l0\.zarr.*no level 1.*\['0'\]"):
+        _open_at(1, tmp_path / "l0.zarr")
+    # Level 0 is unchanged: the plain array and the level-0-only group still open.
+    np.testing.assert_array_equal(_open_at(0, tmp_path / "plain.zarr")[:], data)
+    np.testing.assert_array_equal(_open_at(0, tmp_path / "l0.zarr")[:], data)

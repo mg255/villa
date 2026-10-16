@@ -359,12 +359,22 @@ class ZarrDataset(Dataset):
             level_key = str(self.ome_zarr_resolution)
             if level_key in store:
                 return store[level_key]
+            if self.ome_zarr_resolution:
+                raise ValueError(
+                    f"{path}: ome_zarr_resolution={level_key} requested, but this group has "
+                    f"no level {level_key} (available levels: {sorted(store.array_keys())})"
+                )
             # Fallback keys
             for key in ["0", "data", "arr_0"]:
                 if key in store and hasattr(store[key], "shape"):
                     return store[key]
             raise ValueError(f"Cannot find array in zarr Group at {path}")
 
+        if self.ome_zarr_resolution:
+            raise ValueError(
+                f"{path}: ome_zarr_resolution={self.ome_zarr_resolution} requested, but this is "
+                f"a plain array with no resolution levels (available levels: [level 0 only])"
+            )
         return store
 
     def _get_spatial_shape(self, arr: zarr.Array) -> Tuple[int, ...]:
